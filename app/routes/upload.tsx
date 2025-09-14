@@ -1,33 +1,83 @@
 import { useState, type FormEvent } from 'react';
+import { useNavigate } from "react-router";
 import Navbar from "~/components/Navbar";
 import FileUploader from "~/components/FileUploader";
+import { usePuterStore } from "~/lib/puter";
+import { convertPdfToImage } from "~/lib/pdf2img";
+import { generateUUID } from "~/lib/utils";
+import { prepareInstructions } from "~/constants";
 
 const Upload = () => {
-    const [isProcessing, setProcessing] = useState(false);
+    const { auth, isLoading, fs, ai, kv } = usePuterStore();
+    const navigate = useNavigate();
+    const [isProcessing, setIsProcessing] = useState(false);
     const [statusText, setStatusText] = useState('');
     const [file, setFile] = useState<File | null>(null);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null); // ✅ new state for preview
 
     const handleFileSelect = (file: File | null) => {
         setFile(file);
+        setPreviewUrl(null); // reset preview when selecting new file
     };
 
-    const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    const handleAnalyze = async ({ companyName, jobTitle, jobDescription, file }: { companyName: string, jobTitle: string, jobDescription: string, file: File }) => {
+        setIsProcessing(true);
+        setStatusText('uploading the file...');
+
+        const uploadedFile = await fs.upload([file]);
+        if (!uploadedFile) return setStatusText('Upload failed.');
+
+        setStatusText('converting to image...');
+        const imageFile = await convertPdfToImage(file);
+        if (!imageFile.file) return setStatusText('Failed to convert PDF to image...');
+        setPreviewUrl(imageFile.imageUrl); // ✅ show preview
+
+        setStatusText('uploading image...');
+        const uploadedImage = await fs.upload([imageFile.file]);
+        if (!uploadedImage) return setStatusText('Failed to upload Image...');
+
+        setStatusText('Preparing data...');
+
+        const uuid = generateUUID();
+        const data = {
+            id: uuid,
+            resumePath: uploadedFile.path,
+            imagePath: uploadedImage.path,
+            companyName,
+            jobTitle,
+            jobDescription,
+            feedback: '',
+        };
+        await kv.set(`resume:${uuid}`, JSON.stringify(data));
+        setStatusText('Analyzing ...');
+
+        const feedback = await ai.feedback(
+            uploadedFile.path,
+            prepareInstructions({ jobTitle, jobDescription })
+        );
+        if (!feedback) return setStatusText('Failed to analyze resume...');
+
+        const feedbackText = typeof feedback.message.content === 'string'
+            ? feedback.message.content
+            : feedback.message.content[0].text;
+
+        data.feedback = JSON.parse(feedbackText);
+        await kv.set(`resume:${uuid}`, JSON.stringify(data));
+        setStatusText('Analysis complete redirecting...');
+        console.log(data);
+    };
+
+    const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
 
         const formData = new FormData(e.currentTarget);
-        const companyName = formData.get('company-name');
-        const jobTitle = formData.get('job-title');
-        const jobDescription = formData.get('job-description');
+        const companyName = formData.get('company-name') as string;
+        const jobTitle = formData.get('job-title') as string;
+        const jobDescription = formData.get('job-description') as string;
 
-        console.log({
-            companyName,
-            jobTitle,
-            jobDescription
-        });
+        if (!file) return;
 
-        setProcessing(true);
-        setStatusText("Analyzing your resume...");
-        // TODO: send data + file to backend or API
+        await handleAnalyze({ companyName, jobTitle, jobDescription, file });
     };
 
     return (
@@ -90,6 +140,18 @@ const Upload = () => {
                                     Analyze Resume
                                 </button>
                             </form>
+
+                            {/* ✅ show preview if available */}
+                            {previewUrl && (
+                                <div className="mt-6">
+                                    <h3 className="font-semibold">PDF Preview (Page 1):</h3>
+                                    <img
+                                        src={previewUrl}
+                                        alt="PDF Preview"
+                                        className="border rounded-md shadow-md mt-2 max-w-md"
+                                    />
+                                </div>
+                            )}
                         </>
                     )}
                 </div>
